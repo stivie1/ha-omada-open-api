@@ -979,39 +979,120 @@ Runs on every push to `main` and every pull request targeting `main`. Mirrors th
 ### Release Pipeline (`.github/workflows/release.yml`)
 Tag-based release triggered by pushing a version tag (`v*`).
 
-**How to create a release:**
+The pipeline has 3 sequential jobs:
+1. **Quality Gate** — full lint, format, typecheck, test+coverage, HACS & hassfest (same checks as CI)
+2. **Version Consistency** — verifies the git tag version matches `manifest.json` version
+3. **Create GitHub Release** — builds `omada_open_api.zip`, generates changelog from commits, publishes GitHub Release
 
-1. **Update version numbers** — both files must match the tag:
+### How to Create a Release
+
+#### Prerequisites
+Before creating a release, ensure:
+- All feature/fix code is committed and pushed to `main`
+- All tests pass locally: `pytest tests/ -v`
+- Coverage meets the threshold in `.coverage-threshold`: `pytest tests/ --cov=custom_components.omada_open_api --cov-report=term-missing`
+- Linting passes: `ruff check custom_components/ tests/`
+- Type checking passes: `mypy --config-file pyproject.toml custom_components/omada_open_api/`
+- The latest CI run on `main` is green (check GitHub Actions)
+
+#### Step-by-Step Release Process
+
+**Step 1 — Determine the new version number:**
+
+Use semantic versioning (`MAJOR.MINOR.PATCH`):
+- `PATCH` (e.g., 1.3.1 → 1.3.2): Bug fixes, minor improvements, CI fixes
+- `MINOR` (e.g., 1.3.2 → 1.4.0): New features, new entity types, new platforms
+- `MAJOR` (e.g., 1.4.0 → 2.0.0): Breaking changes (config flow changes requiring re-setup, removed entities, renamed config keys)
+
+Check the current version:
+```bash
+python3 -c "import json; print(json.load(open('custom_components/omada_open_api/manifest.json'))['version'])"
+```
+
+**Step 2 — Update version in BOTH files:**
+
+The version MUST be updated in exactly two files. Both must contain the same version string:
+- `custom_components/omada_open_api/manifest.json` → `"version": "X.Y.Z"`
+- `pyproject.toml` → `version = "X.Y.Z"`
+
+Example for version 1.4.0:
+```bash
+# In manifest.json: change "version": "1.3.1" to "version": "1.4.0"
+# In pyproject.toml: change version = "1.3.1" to version = "1.4.0"
+```
+
+**Step 3 — Commit the version bump:**
+```bash
+git add custom_components/omada_open_api/manifest.json pyproject.toml
+git commit -m "release: bump version to 1.4.0"
+```
+The pre-commit hooks will run. The commit must pass all hooks.
+
+**Step 4 — Tag and push in a single command:**
+```bash
+git tag v1.4.0
+git push origin main --tags
+```
+This pushes the commit AND the tag together, which triggers both CI (for the push) and Release (for the tag).
+
+**Step 5 — Monitor the pipelines:**
+- Go to `https://github.com/bullitt186/ha-omada-open-api/actions`
+- **CI pipeline** should pass (triggered by the push to main)
+- **Release pipeline** should pass (triggered by the v* tag)
+- Release pipeline runs: Quality Gate → Version Consistency → Create GitHub Release
+- On success, a GitHub Release is created with `omada_open_api.zip` attached and an auto-generated changelog
+
+**Step 6 — Verify the release:**
+- Check `https://github.com/bullitt186/ha-omada-open-api/releases` for the new release
+- Verify the release notes and the attached zip file are correct
+
+#### Handling Pipeline Failures After Tagging
+
+If the release pipeline fails after you've pushed the tag:
+
+1. **Fix the issue** in a new commit on `main`
+2. **Delete the old tag** locally and remotely:
    ```bash
-   # Edit version in both files to match the new tag (e.g., 1.2.0)
-   # custom_components/omada_open_api/manifest.json → "version": "1.2.0"
-   # pyproject.toml → version = "1.2.0"
+   git tag -d v1.4.0
+   git push origin :refs/tags/v1.4.0
    ```
-
-2. **Commit the version bump:**
+3. **Recreate the tag** on the fix commit and push:
    ```bash
-   git add custom_components/omada_open_api/manifest.json pyproject.toml
-   git commit -m "release: bump version to 1.2.0"
-   ```
-
-3. **Tag and push:**
-   ```bash
-   git tag v1.2.0
+   git tag v1.4.0
    git push origin main --tags
    ```
+4. This triggers a new Release pipeline run with the updated code
 
-4. **CI does the rest:**
-   - Runs full quality gate (lint, typecheck, tests, coverage, HACS, hassfest)
-   - Verifies tag version matches `manifest.json` version
-   - Builds `omada_open_api.zip` release archive
-   - Creates GitHub Release with auto-generated changelog
+**Note:** Only do this if the GitHub Release was NOT successfully created. If it was, delete the release from the GitHub UI first, then retag.
 
-**Version numbering:** Use semantic versioning (`MAJOR.MINOR.PATCH`):
-- `PATCH` (1.1.1): Bug fixes, minor improvements
-- `MINOR` (1.2.0): New features, new entity types, new platforms
-- `MAJOR` (2.0.0): Breaking changes (config flow changes requiring re-setup, removed entities)
+#### Quick Reference Commands
+```bash
+# Check current version
+python3 -c "import json; print(json.load(open('custom_components/omada_open_api/manifest.json'))['version'])"
+
+# Run all local quality checks before release
+ruff check custom_components/ tests/ && \
+ruff format --check custom_components/ tests/ && \
+pylint --rcfile=pyproject.toml custom_components/omada_open_api/ && \
+mypy --config-file pyproject.toml custom_components/omada_open_api/ && \
+pytest tests/ --cov=custom_components.omada_open_api --cov-fail-under=$(cat .coverage-threshold) -v
+
+# Full release sequence (after version files are updated)
+git add custom_components/omada_open_api/manifest.json pyproject.toml
+git commit -m "release: bump version to X.Y.Z"
+git tag vX.Y.Z
+git push origin main --tags
+
+# Fix-and-retag sequence (if release pipeline fails)
+git tag -d vX.Y.Z
+git push origin :refs/tags/vX.Y.Z
+# ... fix and commit ...
+git tag vX.Y.Z
+git push origin main --tags
+```
 
 **CRITICAL — Version Consistency:**
 - `manifest.json` `version` and `pyproject.toml` `version` MUST always match each other and the git tag.
 - The release workflow has a `version-check` job that blocks the release if tag ≠ manifest version.
 - When asked to prepare a release, always update both version files before tagging.
+- Never push a tag without first committing the matching version bump.
