@@ -791,11 +791,46 @@ async def test_get_clients(hass: HomeAssistant, mock_config_entry) -> None:
     call_url = mock_post.call_args[0][0]
     assert "/sites/site_001/clients" in call_url
 
-    # Verify POST body contains pagination.
+    # Verify POST body contains pagination and default scope (online only).
     call_kwargs = mock_post.call_args[1]
     body = call_kwargs["json"]
     assert body["page"] == 1
     assert body["pageSize"] == 500
+    assert body["scope"] == 1
+
+
+async def test_get_clients_custom_scope(hass: HomeAssistant, mock_config_entry) -> None:
+    """Test get_clients passes a custom scope through to the POST body."""
+    mock_session = MagicMock()
+    mock_callback = AsyncMock()
+    api_client = OmadaApiClient(
+        session=mock_session,
+        token_update_callback=mock_callback,
+        api_url=mock_config_entry.data[CONF_API_URL],
+        omada_id=mock_config_entry.data[CONF_OMADA_ID],
+        client_id=mock_config_entry.data[CONF_CLIENT_ID],
+        client_secret=mock_config_entry.data[CONF_CLIENT_SECRET],
+        access_token=mock_config_entry.data[CONF_ACCESS_TOKEN],
+        refresh_token=mock_config_entry.data[CONF_REFRESH_TOKEN],
+        token_expires_at=dt.datetime.now(dt.UTC) + dt.timedelta(hours=1),
+    )
+
+    clients_data = {"data": [{"mac": "11:22:33:44:55:AA"}], "totalRows": 1}
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json.return_value = {
+        "errorCode": 0,
+        "result": clients_data,
+    }
+
+    mock_post = mock_session.post
+    mock_post.return_value.__aenter__.return_value = mock_response
+    result = await api_client.get_clients("site_001", page=1, page_size=200, scope=0)
+
+    assert result == clients_data
+    call_kwargs = mock_post.call_args[1]
+    body = call_kwargs["json"]
+    assert body["scope"] == 0
 
 
 async def test_get_device_uplink_info(hass: HomeAssistant, mock_config_entry) -> None:

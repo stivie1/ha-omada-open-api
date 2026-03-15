@@ -185,6 +185,9 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             page = 1
             while True:
+                # scope=1 (online) avoids controller warnings for offline
+                # clients missing wifiMode.  The active check below is kept
+                # as defence-in-depth.
                 result = await self.api_client.get_clients(
                     self.site_id, page=page, page_size=1000
                 )

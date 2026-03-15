@@ -436,14 +436,16 @@ class OmadaApiClient:
         return result["result"]  # type: ignore[no-any-return]
 
     async def get_clients(
-        self, site_id: str, page: int = 1, page_size: int = 100
+        self, site_id: str, page: int = 1, page_size: int = 100, scope: int = 1
     ) -> dict[str, Any]:
-        """Get all clients for a site.
+        """Get clients for a site.
 
         Args:
             site_id: Site ID to get clients for
             page: Page number (starts at 1)
             page_size: Number of clients per page (1-1000)
+            scope: Client scope filter — 0: all, 1: online (default),
+                2: offline, 3: blocked
 
         Returns:
             Dictionary with client data including totalRows, currentPage,
@@ -454,7 +456,7 @@ class OmadaApiClient:
         body = {
             "page": page,
             "pageSize": page_size,
-            "scope": 0,  # 0: all clients, 1: online, 2: offline, 3: blocked
+            "scope": scope,
             "filters": {},
         }
 

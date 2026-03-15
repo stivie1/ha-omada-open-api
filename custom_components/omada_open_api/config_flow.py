@@ -517,7 +517,10 @@ class OmadaConfigFlow(ConfigFlow, domain=DOMAIN):
             "Content-Type": "application/json",
         }
 
-        # Request body for client query
+        # scope=0 is intentional here: the config / options flow must
+        # show all known clients (including offline) so the user can
+        # choose which ones to track.  Polling coordinators use scope=1
+        # (online only) to avoid controller-side wifiMode warnings.
         body = {
             "page": 1,
             "pageSize": 200,  # Get first 200 clients
@@ -1280,7 +1283,10 @@ class OmadaOptionsFlowHandler(OptionsFlow):
             "Content-Type": "application/json",
         }
 
-        # Request body for client query
+        # scope=0 is intentional here: the config / options flow must
+        # show all known clients (including offline) so the user can
+        # choose which ones to track.  Polling coordinators use scope=1
+        # (online only) to avoid controller-side wifiMode warnings.
         body = {
             "page": 1,
             "pageSize": 200,  # Get first 200 clients
