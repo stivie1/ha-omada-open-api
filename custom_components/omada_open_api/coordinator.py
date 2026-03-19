@@ -205,6 +205,7 @@ class OmadaSiteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "mac": client.get("mac", ""),
                             "ip": client.get("ip", ""),
                             "wireless": client.get("wireless", False),
+                            "guest": client.get("guest", False),
                             "ap_mac": client.get("apMac"),
                             "switch_mac": client.get("switchMac"),
                             "gateway_mac": client.get("gatewayMac"),
