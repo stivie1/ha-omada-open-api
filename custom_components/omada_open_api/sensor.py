@@ -163,6 +163,23 @@ DEVICE_SENSORS: tuple[OmadaSensorEntityDescription, ...] = (
         },
     ),
     OmadaSensorEntityDescription(
+        key="guest_clients",
+        translation_key="guest_clients",
+        name="Guest clients",
+        icon=ICON_CLIENTS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda device: len(
+            [c for c in device.get("connected_clients", []) if c.get("guest")]
+        ),
+        attrs_fn=lambda device: {
+            "clients": [
+                {"name": c["name"], "mac": c["mac"], "ip": c["ip"]}
+                for c in device.get("connected_clients", [])
+                if c.get("guest")
+            ]
+        },
+    ),
+    OmadaSensorEntityDescription(
         key="uptime",
         translation_key="uptime",
         name="Uptime",
@@ -747,6 +764,11 @@ def _site_wireless_clients(data: dict[str, Any]) -> int:
     return len([c for c in data.get("all_clients", []) if c.get("wireless")])
 
 
+def _site_guest_clients(data: dict[str, Any]) -> int:
+    """Return guest client count for the site."""
+    return len([c for c in data.get("all_clients", []) if c.get("guest")])
+
+
 def _site_poe_consumption(data: dict[str, Any]) -> float:
     """Return total PoE consumption in watts across all switches."""
     poe_budget = data.get("poe_budget", {})
@@ -799,6 +821,17 @@ SITE_SENSORS: tuple[OmadaSiteSensorEntityDescription, ...] = (
         value_fn=_site_wireless_clients,
         attrs_fn=lambda data: _client_list_attrs(
             [c for c in data.get("all_clients", []) if c.get("wireless")]
+        ),
+    ),
+    OmadaSiteSensorEntityDescription(
+        key="site_guest_clients",
+        translation_key="site_guest_clients",
+        name="Guest clients",
+        icon=ICON_CLIENTS,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=_site_guest_clients,
+        attrs_fn=lambda data: _client_list_attrs(
+            [c for c in data.get("all_clients", []) if c.get("guest")]
         ),
     ),
     OmadaSiteSensorEntityDescription(
