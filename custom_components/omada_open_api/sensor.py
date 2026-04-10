@@ -880,6 +880,54 @@ def _setup_site_sensors(
         async_add_entities(site_entities)
 
 
+def _make_device_sensor(
+    coordinator: OmadaSiteCoordinator,
+    description: OmadaSensorEntityDescription,
+    device_mac: str,
+) -> OmadaDeviceSensor:
+    """Instantiate the appropriate device sensor class for *description*.
+
+    Returns ``OmadaDeviceUptimeSensor`` for the ``uptime`` key so that
+    hysteresis and reboot detection are applied; falls back to the generic
+    ``OmadaDeviceSensor`` for all other descriptions.
+    """
+    if description.key == "uptime":
+        return OmadaDeviceUptimeSensor(
+            coordinator=coordinator,
+            description=description,
+            device_mac=device_mac,
+        )
+    return OmadaDeviceSensor(
+        coordinator=coordinator,
+        description=description,
+        device_mac=device_mac,
+    )
+
+
+def _make_client_sensor(
+    coordinator: OmadaClientCoordinator,
+    description: OmadaSensorEntityDescription,
+    client_mac: str,
+) -> OmadaClientSensor:
+    """Instantiate the appropriate client sensor class for *description*.
+
+    Returns ``OmadaClientUptimeSensor`` for the ``client_uptime`` key so that
+    hysteresis and reconnect detection are applied; falls back to the generic
+    ``OmadaClientSensor`` for all other descriptions.
+    """
+    if description.key == "client_uptime":
+        return OmadaClientUptimeSensor(
+            coordinator=coordinator,
+            description=description,
+            client_mac=client_mac,
+        )
+    return OmadaClientSensor(
+        coordinator=coordinator,
+        description=description,
+        client_mac=client_mac,
+    )
+
+
 async def async_setup_entry(  # pylint: disable=too-many-locals,too-many-statements
     hass: HomeAssistant,
     entry: OmadaConfigEntry,
@@ -931,19 +979,7 @@ async def async_setup_entry(  # pylint: disable=too-many-locals,too-many-stateme
                     device = devices.get(mac, {})
                     device_type = device.get("type", "").lower()
                     new_entities.extend(
-                        (
-                            OmadaDeviceUptimeSensor(
-                                coordinator=c,
-                                description=desc,
-                                device_mac=mac,
-                            )
-                            if desc.key == "uptime"
-                            else OmadaDeviceSensor(
-                                coordinator=c,
-                                description=desc,
-                                device_mac=mac,
-                            )
-                        )
+                        _make_device_sensor(c, desc, mac)
                         for desc in DEVICE_SENSORS
                         if desc.applicable_types is None
                         or device_type in desc.applicable_types
@@ -1012,19 +1048,7 @@ async def async_setup_entry(  # pylint: disable=too-many-locals,too-many-stateme
             known_client_macs.update(new_macs)
 
             new_entities: list[SensorEntity] = [
-                (
-                    OmadaClientUptimeSensor(
-                        coordinator=coord,
-                        description=desc,
-                        client_mac=mac,
-                    )
-                    if desc.key == "client_uptime"
-                    else OmadaClientSensor(
-                        coordinator=coord,
-                        description=desc,
-                        client_mac=mac,
-                    )
-                )
+                _make_client_sensor(coord, desc, mac)
                 for mac in new_macs
                 for desc in CLIENT_SENSORS
             ]
@@ -1196,7 +1220,7 @@ class OmadaDeviceUptimeSensor(OmadaDeviceSensor):
     1. **Ceil-to-30s**: the candidate boot timestamp is rounded *up* to the
        nearest 30-second boundary so that small timing variations cannot cause
        the value to oscillate across a minute boundary (the "09:22 <-> 09:23
-       flip-flop" described in issue #XXX).
+       flip-flop").
 
     2. **>= 60 s hysteresis**: a new state is only published when the snapped
        candidate differs from the last published value by at least 60 seconds.
