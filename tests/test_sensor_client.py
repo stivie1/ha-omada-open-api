@@ -613,7 +613,8 @@ async def test_client_uptime_update_after_large_change(hass: HomeAssistant) -> N
         mock_dt.utcnow.return_value = base
         v1 = sensor.native_value
 
-    # Wall-clock advances 120 s, uptime only 60 s -> boot time shifts +60 s.
+    # Wall-clock advances 120 s, uptime advances only 60 s -> the computed boot
+    # time (now - uptime) becomes 60 s later (shifts forward by 60 s).
     data["uptime"] = 160
     sensor.coordinator.data = {WIRELESS_MAC: data}
     with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:

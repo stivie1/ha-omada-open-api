@@ -595,7 +595,8 @@ async def test_device_uptime_update_after_large_change(hass: HomeAssistant) -> N
         v1 = sensor.native_value
 
     # Simulate API reporting a significantly different (60 s) uptime drift.
-    # Advance wall-clock by 120 s, uptime by only 60 s -> boot time shifts +60 s.
+    # Wall-clock advances 120 s, uptime advances only 60 s -> the computed boot
+    # time (now - uptime) becomes 60 s later (shifts forward by 60 s).
     data["uptime"] = 160
     sensor.coordinator.data = _build_coordinator_data({AP_MAC: data})
     with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
