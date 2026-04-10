@@ -59,6 +59,11 @@ PARALLEL_UPDATES = 0
 
 _LOGGER = logging.getLogger(__name__)
 
+# Uptime sensor anti-spam: treat a drop in reported uptime >= this value as a reboot.
+_UPTIME_REBOOT_THRESHOLD_SECONDS: int = 120
+# Uptime sensor anti-spam: minimum change in computed boot timestamp to publish a new state.
+_UPTIME_MIN_DELTA_SECONDS: int = 60
+
 # Human-readable labels for device type abbreviations from the API.
 DEVICE_TYPE_LABELS: dict[str, str] = {
     "ap": "Access Point",
@@ -101,6 +106,20 @@ def _auto_scale_bytes(
         return value / 1_000, UnitOfInformation.KILOBYTES
 
     return value, UnitOfInformation.BYTES
+
+
+def _ceil_to_30s(ts: dt.datetime) -> dt.datetime:
+    """Round a timestamp up to the next 30-second boundary (ceiling).
+
+    Snapping the computed boot time to a 30-second ceiling prevents the
+    "minute flip-flop" where small timing variations cause the displayed
+    timestamp to oscillate (e.g. "09:22" <-> "09:23").  The caller should
+    pass a timestamp with microsecond=0.
+    """
+    remainder = ts.second % 30
+    if remainder == 0:
+        return ts
+    return ts + dt.timedelta(seconds=30 - remainder)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -912,10 +931,18 @@ async def async_setup_entry(  # pylint: disable=too-many-locals,too-many-stateme
                     device = devices.get(mac, {})
                     device_type = device.get("type", "").lower()
                     new_entities.extend(
-                        OmadaDeviceSensor(
-                            coordinator=c,
-                            description=desc,
-                            device_mac=mac,
+                        (
+                            OmadaDeviceUptimeSensor(
+                                coordinator=c,
+                                description=desc,
+                                device_mac=mac,
+                            )
+                            if desc.key == "uptime"
+                            else OmadaDeviceSensor(
+                                coordinator=c,
+                                description=desc,
+                                device_mac=mac,
+                            )
                         )
                         for desc in DEVICE_SENSORS
                         if desc.applicable_types is None
@@ -985,10 +1012,18 @@ async def async_setup_entry(  # pylint: disable=too-many-locals,too-many-stateme
             known_client_macs.update(new_macs)
 
             new_entities: list[SensorEntity] = [
-                OmadaClientSensor(
-                    coordinator=coord,
-                    description=desc,
-                    client_mac=mac,
+                (
+                    OmadaClientUptimeSensor(
+                        coordinator=coord,
+                        description=desc,
+                        client_mac=mac,
+                    )
+                    if desc.key == "client_uptime"
+                    else OmadaClientSensor(
+                        coordinator=coord,
+                        description=desc,
+                        client_mac=mac,
+                    )
                 )
                 for mac in new_macs
                 for desc in CLIENT_SENSORS
@@ -1153,6 +1188,85 @@ class OmadaDeviceSensor(OmadaEntity[OmadaSiteCoordinator], SensorEntity):
         return self.entity_description.attrs_fn(device_data)
 
 
+class OmadaDeviceUptimeSensor(OmadaDeviceSensor):
+    """Device uptime sensor with anti-spam hysteresis.
+
+    Overrides ``native_value`` to apply two noise-reduction measures:
+
+    1. **Ceil-to-30s**: the candidate boot timestamp is rounded *up* to the
+       nearest 30-second boundary so that small timing variations cannot cause
+       the value to oscillate across a minute boundary (the "09:22 <-> 09:23
+       flip-flop" described in issue #XXX).
+
+    2. **>= 60 s hysteresis**: a new state is only published when the snapped
+       candidate differs from the last published value by at least 60 seconds.
+       This prevents HA recorder / activity-log spam that occurs when the
+       coordinator polls every few minutes and the computed boot time changes
+       by only a second or two.
+
+    Reboot detection: if the device reports a *lower* uptime than previously
+    seen (drop > ``_UPTIME_REBOOT_THRESHOLD_SECONDS``), the new state is
+    published immediately so the UI reflects the reboot without delay.
+    """
+
+    def __init__(
+        self,
+        coordinator: OmadaSiteCoordinator,
+        description: OmadaSensorEntityDescription,
+        device_mac: str,
+    ) -> None:
+        """Initialize the uptime sensor with per-entity cached state."""
+        super().__init__(
+            coordinator=coordinator,
+            description=description,
+            device_mac=device_mac,
+        )
+        self._last_published_boot_ts: dt.datetime | None = None
+        self._last_uptime_seconds: int | None = None
+
+    @property
+    def native_value(self) -> StateType:
+        """Return a stable boot timestamp, suppressing minor jitter.
+
+        Applies ceil-to-30s snapping and a 60-second hysteresis window so that
+        HA does not record a new state on every coordinator poll.
+        """
+        device_data = self.coordinator.data.get("devices", {}).get(self._device_mac)
+        if device_data is None:
+            return None
+        uptime_seconds = device_data.get("uptime")
+        if uptime_seconds is None:
+            return None
+
+        now = dt_util.utcnow().replace(microsecond=0)
+        candidate = _ceil_to_30s(now - dt.timedelta(seconds=uptime_seconds))
+
+        last_ts = self._last_published_boot_ts
+        last_up = self._last_uptime_seconds
+        self._last_uptime_seconds = uptime_seconds
+
+        if last_ts is None:
+            # First value after startup: publish immediately.
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # Reboot detection: device uptime dropped significantly.
+        if (
+            last_up is not None
+            and uptime_seconds < last_up - _UPTIME_REBOOT_THRESHOLD_SECONDS
+        ):
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # Hysteresis: suppress updates smaller than the configured threshold.
+        if abs((candidate - last_ts).total_seconds()) >= _UPTIME_MIN_DELTA_SECONDS:
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # No significant change: return the cached value to avoid a recorder entry.
+        return last_ts  # type: ignore[return-value]
+
+
 class OmadaSiteSensor(OmadaEntity[OmadaSiteCoordinator], SensorEntity):
     """Representation of an Omada site-level aggregation sensor."""
 
@@ -1277,6 +1391,73 @@ class OmadaClientSensor(OmadaEntity[OmadaClientCoordinator], SensorEntity):
             return False
 
         return self.entity_description.available_fn(client_data)
+
+
+class OmadaClientUptimeSensor(OmadaClientSensor):
+    """Client uptime sensor with anti-spam hysteresis.
+
+    Mirrors ``OmadaDeviceUptimeSensor`` for client entities: applies
+    ceil-to-30s snapping and a 60-second hysteresis window to prevent HA
+    recorder / activity-log spam, and detects client reconnections (uptime
+    reset) so the UI updates promptly after a client reconnects.
+    """
+
+    def __init__(
+        self,
+        coordinator: OmadaClientCoordinator,
+        description: OmadaSensorEntityDescription,
+        client_mac: str,
+    ) -> None:
+        """Initialize the client uptime sensor with per-entity cached state."""
+        super().__init__(
+            coordinator=coordinator,
+            description=description,
+            client_mac=client_mac,
+        )
+        self._last_published_boot_ts: dt.datetime | None = None
+        self._last_uptime_seconds: int | None = None
+
+    @property
+    def native_value(self) -> StateType:
+        """Return a stable boot timestamp, suppressing minor jitter.
+
+        Applies ceil-to-30s snapping and a 60-second hysteresis window so that
+        HA does not record a new state on every coordinator poll.
+        """
+        client_data = self.coordinator.data.get(self._client_mac)
+        if client_data is None:
+            return None
+        uptime_seconds = client_data.get("uptime")
+        if uptime_seconds is None:
+            return None
+
+        now = dt_util.utcnow().replace(microsecond=0)
+        candidate = _ceil_to_30s(now - dt.timedelta(seconds=uptime_seconds))
+
+        last_ts = self._last_published_boot_ts
+        last_up = self._last_uptime_seconds
+        self._last_uptime_seconds = uptime_seconds
+
+        if last_ts is None:
+            # First value after startup: publish immediately.
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # Reconnect detection: client uptime dropped significantly.
+        if (
+            last_up is not None
+            and uptime_seconds < last_up - _UPTIME_REBOOT_THRESHOLD_SECONDS
+        ):
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # Hysteresis: suppress updates smaller than the configured threshold.
+        if abs((candidate - last_ts).total_seconds()) >= _UPTIME_MIN_DELTA_SECONDS:
+            self._last_published_boot_ts = candidate
+            return candidate  # type: ignore[return-value]
+
+        # No significant change: return the cached value to avoid a recorder entry.
+        return last_ts  # type: ignore[return-value]
 
 
 class OmadaPoeBudgetSensor(OmadaEntity[OmadaSiteCoordinator], SensorEntity):

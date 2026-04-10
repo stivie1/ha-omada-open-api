@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -16,6 +16,7 @@ from custom_components.omada_open_api.sensor import (
     AP_BAND_CLIENT_SENSORS,
     DEVICE_SENSORS,
     OmadaDeviceSensor,
+    OmadaDeviceUptimeSensor,
 )
 
 from .conftest import (
@@ -512,3 +513,152 @@ async def test_band_5g_client_attrs(hass: HomeAssistant) -> None:
     assert attrs is not None
     assert len(attrs["clients"]) == 1
     assert attrs["clients"][0]["name"] == "Laptop"
+
+
+# ---------------------------------------------------------------------------
+# OmadaDeviceUptimeSensor - hysteresis & reboot detection
+# ---------------------------------------------------------------------------
+
+_SENSOR_MODULE = "custom_components.omada_open_api.sensor"
+_UTC = _dt.UTC
+
+
+def _create_device_uptime_sensor(
+    hass: HomeAssistant,
+    device_mac: str,
+    devices: dict,
+) -> OmadaDeviceUptimeSensor:
+    """Create an OmadaDeviceUptimeSensor with a mock coordinator."""
+    coordinator = OmadaSiteCoordinator(
+        hass=hass,
+        api_client=MagicMock(),
+        site_id=TEST_SITE_ID,
+        site_name=TEST_SITE_NAME,
+    )
+    coordinator.data = _build_coordinator_data(devices)
+    description = next(d for d in DEVICE_SENSORS if d.key == "uptime")
+    return OmadaDeviceUptimeSensor(
+        coordinator=coordinator,
+        description=description,
+        device_mac=device_mac,
+    )
+
+
+async def test_device_uptime_first_call_publishes(hass: HomeAssistant) -> None:
+    """Test first native_value call publishes the snapped boot timestamp."""
+    base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
+    data = process_device(SAMPLE_DEVICE_AP)
+    data["uptime"] = 100  # boot at 11:58:20 -> ceiled to 11:58:30
+    sensor = _create_device_uptime_sensor(hass, AP_MAC, {AP_MAC: data})
+
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        value = sensor.native_value
+
+    expected = _dt.datetime(2026, 1, 1, 11, 58, 30, tzinfo=_UTC)
+    assert value == expected
+    assert isinstance(value, _dt.datetime)
+    assert value.tzinfo is not None
+
+
+async def test_device_uptime_no_update_small_change(hass: HomeAssistant) -> None:
+    """Test no state update when computed boot time changes by < 60 s."""
+    base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
+    data = process_device(SAMPLE_DEVICE_AP)
+    data["uptime"] = 100
+    sensor = _create_device_uptime_sensor(hass, AP_MAC, {AP_MAC: data})
+
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        v1 = sensor.native_value  # caches boot ts
+
+    # 30 s later, uptime advances by 30 s - raw boot time unchanged but
+    # within the 60 s hysteresis window.
+    data["uptime"] = 130
+    sensor.coordinator.data = _build_coordinator_data({AP_MAC: data})
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base + _dt.timedelta(seconds=30)
+        v2 = sensor.native_value
+
+    assert v2 == v1  # cached value returned, no recorder update
+
+
+async def test_device_uptime_update_after_large_change(hass: HomeAssistant) -> None:
+    """Test new state published when boot time shifts by >= 60 s."""
+    base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
+    data = process_device(SAMPLE_DEVICE_AP)
+    data["uptime"] = 100
+    sensor = _create_device_uptime_sensor(hass, AP_MAC, {AP_MAC: data})
+
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        v1 = sensor.native_value
+
+    # Simulate API reporting a significantly different (60 s) uptime drift.
+    # Advance wall-clock by 120 s, uptime by only 60 s -> boot time shifts +60 s.
+    data["uptime"] = 160
+    sensor.coordinator.data = _build_coordinator_data({AP_MAC: data})
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base + _dt.timedelta(seconds=120)
+        v2 = sensor.native_value
+
+    assert v2 is not None
+    assert v1 is not None
+    assert abs((v2 - v1).total_seconds()) >= 60
+
+
+async def test_device_uptime_reboot_publishes_immediately(
+    hass: HomeAssistant,
+) -> None:
+    """Test reboot (uptime drops > 120 s) forces an immediate state update."""
+    base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
+    data = process_device(SAMPLE_DEVICE_AP)
+    data["uptime"] = 3600  # 1 h uptime
+    sensor = _create_device_uptime_sensor(hass, AP_MAC, {AP_MAC: data})
+
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        v1 = sensor.native_value
+
+    # Reboot: uptime drops to 10 s (well below 120 s threshold).
+    data["uptime"] = 10
+    sensor.coordinator.data = _build_coordinator_data({AP_MAC: data})
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base + _dt.timedelta(seconds=10)
+        v2 = sensor.native_value
+
+    # Boot time should have moved forward significantly (reboot detected).
+    assert v2 is not None
+    assert v1 is not None
+    assert v2 > v1  # device rebooted, so new boot time is later
+
+
+async def test_device_uptime_no_flip_flop_around_boundary(
+    hass: HomeAssistant,
+) -> None:
+    """Test ceil-to-30s prevents jitter across a 30-second boundary.
+
+    Without rounding, a boot time of 09:22:55 and 09:23:05 would both
+    display as different minutes in the HA UI.  With ceil-to-30s both snap
+    to 09:23:00 and 09:23:30 respectively, eliminating the flip-flop.
+    """
+    # Choose a "now" so that the raw boot time sits near a 30-second boundary.
+    # uptime=65 s -> raw boot = 12:00:00 - 65 s = 11:58:55 -> ceil -> 11:59:00
+    base = _dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
+    data = process_device(SAMPLE_DEVICE_AP)
+    data["uptime"] = 65
+    sensor = _create_device_uptime_sensor(hass, AP_MAC, {AP_MAC: data})
+
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        v1 = sensor.native_value
+
+    # One poll later: uptime=66 s, now=12:00:01
+    # raw = 12:00:01 - 66 s = 11:58:55 -> ceil -> 11:59:00  (same snapped value)
+    data["uptime"] = 66
+    sensor.coordinator.data = _build_coordinator_data({AP_MAC: data})
+    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base + _dt.timedelta(seconds=1)
+        v2 = sensor.native_value
+
+    assert v1 == v2  # same snapped value, no flip-flop
