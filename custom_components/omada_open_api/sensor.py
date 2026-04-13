@@ -185,10 +185,13 @@ DEVICE_SENSORS: tuple[OmadaSensorEntityDescription, ...] = (
         name="Uptime",
         icon=ICON_UPTIME,
         device_class=SensorDeviceClass.TIMESTAMP,
+        # Floor both now and uptime to whole minutes to prevent recorder spam
+        # and eliminate minute-boundary flip-flop. The computed boot timestamp
+        # only changes when uptime changes by >= 60 s.
         value_fn=lambda device: (  # type: ignore[arg-type]
             (  # type: ignore[return-value]
-                dt_util.utcnow().replace(microsecond=0)
-                - dt.timedelta(seconds=device["uptime"])
+                dt_util.utcnow().replace(microsecond=0, second=0)
+                - dt.timedelta(seconds=(device["uptime"] // 60) * 60)
             )
             if device.get("uptime") is not None
             else None
@@ -528,10 +531,13 @@ CLIENT_SENSORS: tuple[OmadaSensorEntityDescription, ...] = (
         name="Uptime",
         icon=ICON_UPTIME,
         device_class=SensorDeviceClass.TIMESTAMP,
+        # Floor both now and uptime to whole minutes to prevent recorder spam
+        # and eliminate minute-boundary flip-flop. The computed boot timestamp
+        # only changes when uptime changes by >= 60 s.
         value_fn=lambda client: (  # type: ignore[arg-type]
             (  # type: ignore[return-value]
-                dt_util.utcnow().replace(microsecond=0)
-                - dt.timedelta(seconds=client["uptime"])
+                dt_util.utcnow().replace(microsecond=0, second=0)
+                - dt.timedelta(seconds=(client["uptime"] // 60) * 60)
             )
             if client.get("uptime") is not None
             else None
