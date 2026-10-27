@@ -717,26 +717,22 @@ async def test_client_uptime_no_update_small_change(hass: HomeAssistant) -> None
     assert v2 == v1
 
 
-async def test_client_uptime_update_after_large_change(hass: HomeAssistant) -> None:
-    """Test new state published when boot time shifts by >= 60 s."""
+async def test_client_uptime_ignores_reported_jitter(hass: HomeAssistant) -> None:
+    """Keep the published boot timestamp stable across ordinary uptime jitter."""
     base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=_UTC)
     data = process_client(SAMPLE_CLIENT_WIRELESS)
-    data["uptime"] = 100
+    data["uptime"] = 9000
     sensor = _create_client_uptime_sensor(hass, WIRELESS_MAC, {WIRELESS_MAC: data})
 
-    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
-        mock_dt.utcnow.return_value = base
-        v1 = sensor.native_value
+    published: list[dt.datetime | None] = []
+    for elapsed, uptime in enumerate((9000, 9060, 9000, 9060)):
+        data["uptime"] = uptime
+        sensor.coordinator.data = {WIRELESS_MAC: data}
+        with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
+            mock_dt.utcnow.return_value = base + dt.timedelta(minutes=elapsed)
+            published.append(sensor.native_value)
 
-    data["uptime"] = 160
-    sensor.coordinator.data = {WIRELESS_MAC: data}
-    with patch(f"{_SENSOR_MODULE}.dt_util") as mock_dt:
-        mock_dt.utcnow.return_value = base + dt.timedelta(seconds=120)
-        v2 = sensor.native_value
-
-    assert v2 is not None
-    assert v1 is not None
-    assert abs((v2 - v1).total_seconds()) >= 60
+    assert len(set(published)) == 1
 
 
 async def test_client_uptime_reconnect_publishes_immediately(

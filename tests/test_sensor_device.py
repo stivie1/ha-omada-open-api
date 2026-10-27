@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -19,6 +19,7 @@ from custom_components.omada_open_api.sensor import (
     AP_BAND_CLIENT_SENSORS,
     DEVICE_SENSORS,
     OmadaDeviceSensor,
+    OmadaDeviceUptimeSensor,
     OmadaSensorEntityDescription,
 )
 
@@ -69,6 +70,27 @@ def _create_device_sensor(
     description = next(d for d in sensor_list if d.key == description_key)
 
     return OmadaDeviceSensor(
+        coordinator=coordinator,
+        description=description,
+        device_mac=device_mac,
+    )
+
+
+def _create_device_uptime_sensor(
+    hass: HomeAssistant,
+    device_mac: str,
+    devices: dict[str, dict],
+) -> OmadaDeviceUptimeSensor:
+    """Create an OmadaDeviceUptimeSensor with a mock coordinator."""
+    coordinator = OmadaSiteCoordinator(
+        hass=hass,
+        api_client=MagicMock(),
+        site_id=TEST_SITE_ID,
+        site_name=TEST_SITE_NAME,
+    )
+    coordinator.data = _build_coordinator_data(devices)
+    description = next(d for d in DEVICE_SENSORS if d.key == "uptime")
+    return OmadaDeviceUptimeSensor(
         coordinator=coordinator,
         description=description,
         device_mac=device_mac,
@@ -414,6 +436,46 @@ async def test_uptime_unavailable_when_none(hass: HomeAssistant) -> None:
     data["uptime"] = None
     sensor = _create_device_sensor(hass, AP_MAC, {AP_MAC: data}, "uptime")
     assert sensor.available is False
+
+
+async def test_device_uptime_ignores_reported_jitter(hass: HomeAssistant) -> None:
+    """Keep the published boot timestamp stable across ordinary uptime jitter."""
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    data = process_device(SAMPLE_DEVICE_SWITCH)
+    data["uptime"] = 9000
+    sensor = _create_device_uptime_sensor(hass, SWITCH_MAC, {SWITCH_MAC: data})
+
+    published: list[dt.datetime | None] = []
+    for elapsed, uptime in enumerate((9000, 9060, 9000, 9060)):
+        data["uptime"] = uptime
+        sensor.coordinator.data = _build_coordinator_data({SWITCH_MAC: data})
+        with patch("custom_components.omada_open_api.sensor.dt_util") as mock_dt:
+            mock_dt.utcnow.return_value = base + dt.timedelta(minutes=elapsed)
+            published.append(sensor.native_value)
+
+    assert len(set(published)) == 1
+
+
+async def test_device_uptime_updates_after_reboot(hass: HomeAssistant) -> None:
+    """Publish a new boot timestamp when uptime drops below its high-water mark."""
+    base = dt.datetime(2026, 1, 1, 12, 0, 0, tzinfo=dt.UTC)
+    data = process_device(SAMPLE_DEVICE_SWITCH)
+    data["uptime"] = 9000
+    sensor = _create_device_uptime_sensor(hass, SWITCH_MAC, {SWITCH_MAC: data})
+
+    with patch("custom_components.omada_open_api.sensor.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base
+        first = sensor.native_value
+
+    data["uptime"] = 10
+    sensor.coordinator.data = _build_coordinator_data({SWITCH_MAC: data})
+    with patch("custom_components.omada_open_api.sensor.dt_util") as mock_dt:
+        mock_dt.utcnow.return_value = base + dt.timedelta(seconds=10)
+        after_reboot = sensor.native_value
+
+    assert first is not None
+    assert after_reboot is not None
+    assert after_reboot > first
 
 
 # ---------------------------------------------------------------------------

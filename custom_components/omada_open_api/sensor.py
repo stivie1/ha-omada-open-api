@@ -103,8 +103,6 @@ _CLIENT_BANDWIDTH_SENSOR_KEYS: frozenset[str] = frozenset(
 
 # Uptime sensor anti-spam: treat a drop in reported uptime >= this value as a reboot.
 _UPTIME_REBOOT_THRESHOLD_SECONDS: int = 120
-# Uptime sensor anti-spam: minimum change in computed boot timestamp to publish a new state.
-_UPTIME_MIN_DELTA_SECONDS: int = 60
 
 # Human-readable labels for device type abbreviations from the API.
 DEVICE_TYPE_LABELS: dict[str, str] = {
@@ -1946,11 +1944,10 @@ class OmadaDeviceSensor(OmadaEntity[OmadaSiteCoordinator], SensorEntity):
 
 
 class OmadaDeviceUptimeSensor(OmadaDeviceSensor):
-    """Device uptime sensor with anti-spam hysteresis.
+    """Device uptime sensor that ignores reported uptime jitter.
 
-    Applies ceil-to-30s snapping and a 60-second hysteresis window to prevent
-    HA recorder / activity-log spam, and detects device reboots so the UI
-    updates promptly.
+    Holds the initial boot timestamp steady and updates it only when uptime
+    drops significantly below its high-water mark, indicating a reboot.
     """
 
     def __init__(
@@ -1966,7 +1963,7 @@ class OmadaDeviceUptimeSensor(OmadaDeviceSensor):
             device_mac=device_mac,
         )
         self._last_published_boot_ts: dt.datetime | None = None
-        self._last_uptime_seconds: int | None = None
+        self._uptime_high_water_mark: int | None = None
 
     @property
     def native_value(self) -> StateType:
@@ -1982,27 +1979,24 @@ class OmadaDeviceUptimeSensor(OmadaDeviceSensor):
         candidate = _ceil_to_30s(now - dt.timedelta(seconds=uptime_seconds))
 
         last_ts = self._last_published_boot_ts
-        last_up = self._last_uptime_seconds
-        self._last_uptime_seconds = uptime_seconds
-
+        high_water_mark = self._uptime_high_water_mark
         if last_ts is None:
             self._last_published_boot_ts = candidate
+            self._uptime_high_water_mark = uptime_seconds
             return candidate  # type: ignore[return-value]
 
-        # Reboot detection: device uptime dropped significantly.
+        if high_water_mark is None or uptime_seconds > high_water_mark:
+            self._uptime_high_water_mark = uptime_seconds
+
+        # A lower reading alone is not enough: controller uptime can jitter.
         if (
-            last_up is not None
-            and uptime_seconds < last_up - _UPTIME_REBOOT_THRESHOLD_SECONDS
+            high_water_mark is not None
+            and uptime_seconds < high_water_mark - _UPTIME_REBOOT_THRESHOLD_SECONDS
         ):
             self._last_published_boot_ts = candidate
+            self._uptime_high_water_mark = uptime_seconds
             return candidate  # type: ignore[return-value]
 
-        # Hysteresis: suppress updates smaller than the configured threshold.
-        if abs((candidate - last_ts).total_seconds()) >= _UPTIME_MIN_DELTA_SECONDS:
-            self._last_published_boot_ts = candidate
-            return candidate  # type: ignore[return-value]
-
-        # No significant change: return the cached value.
         return last_ts  # type: ignore[return-value]
 
 
@@ -2178,11 +2172,10 @@ class OmadaClientSensor(OmadaEntity[OmadaClientCoordinator], SensorEntity):
 
 
 class OmadaClientUptimeSensor(OmadaClientSensor):
-    """Client uptime sensor with anti-spam hysteresis.
+    """Client uptime sensor that ignores reported uptime jitter.
 
-    Mirrors ``OmadaDeviceUptimeSensor`` for client entities: applies
-    ceil-to-30s snapping and a 60-second hysteresis window to prevent HA
-    recorder / activity-log spam, and detects client reconnections.
+    Holds the initial boot timestamp steady and updates it only when uptime
+    drops significantly below its high-water mark, indicating a reconnection.
     """
 
     def __init__(
@@ -2198,7 +2191,7 @@ class OmadaClientUptimeSensor(OmadaClientSensor):
             client_mac=client_mac,
         )
         self._last_published_boot_ts: dt.datetime | None = None
-        self._last_uptime_seconds: int | None = None
+        self._uptime_high_water_mark: int | None = None
 
     @property
     def native_value(self) -> StateType:
@@ -2214,27 +2207,24 @@ class OmadaClientUptimeSensor(OmadaClientSensor):
         candidate = _ceil_to_30s(now - dt.timedelta(seconds=uptime_seconds))
 
         last_ts = self._last_published_boot_ts
-        last_up = self._last_uptime_seconds
-        self._last_uptime_seconds = uptime_seconds
-
+        high_water_mark = self._uptime_high_water_mark
         if last_ts is None:
             self._last_published_boot_ts = candidate
+            self._uptime_high_water_mark = uptime_seconds
             return candidate  # type: ignore[return-value]
 
-        # Reconnect detection: client uptime dropped significantly.
+        if high_water_mark is None or uptime_seconds > high_water_mark:
+            self._uptime_high_water_mark = uptime_seconds
+
+        # A lower reading alone is not enough: controller uptime can jitter.
         if (
-            last_up is not None
-            and uptime_seconds < last_up - _UPTIME_REBOOT_THRESHOLD_SECONDS
+            high_water_mark is not None
+            and uptime_seconds < high_water_mark - _UPTIME_REBOOT_THRESHOLD_SECONDS
         ):
             self._last_published_boot_ts = candidate
+            self._uptime_high_water_mark = uptime_seconds
             return candidate  # type: ignore[return-value]
 
-        # Hysteresis: suppress updates smaller than the configured threshold.
-        if abs((candidate - last_ts).total_seconds()) >= _UPTIME_MIN_DELTA_SECONDS:
-            self._last_published_boot_ts = candidate
-            return candidate  # type: ignore[return-value]
-
-        # No significant change: return the cached value.
         return last_ts  # type: ignore[return-value]
 
 
